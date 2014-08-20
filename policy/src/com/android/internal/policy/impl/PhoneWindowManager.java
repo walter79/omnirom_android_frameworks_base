@@ -32,6 +32,7 @@ import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.ServiceConnection;
@@ -45,6 +46,7 @@ import android.content.res.TypedArray;
 import android.database.ContentObserver;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.hardware.input.InputManager;
 import android.media.AudioManager;
 import android.media.AudioSystem;
 import android.media.IAudioService;
@@ -70,6 +72,10 @@ import android.os.Vibrator;
 import android.provider.Settings;
 import android.service.dreams.DreamService;
 import android.service.dreams.IDreamManager;
+import com.android.internal.os.DeviceKeyHandler;
+
+import dalvik.system.DexClassLoader;
+
 import android.util.DisplayMetrics;
 import android.util.EventLog;
 import android.util.Log;
@@ -124,6 +130,7 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.util.List;
 import java.util.HashSet;
+import java.lang.reflect.Constructor;
 
 import static android.view.WindowManager.LayoutParams.*;
 import static android.view.WindowManagerPolicy.WindowManagerFuncs.LID_ABSENT;
@@ -241,6 +248,8 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                 KeyEvent.KEYCODE_CALCULATOR, Intent.CATEGORY_APP_CALCULATOR);
     }
 
+    private DeviceKeyHandler mDeviceKeyHandler;
+
     /**
      * Lock protecting internal state.  Must not call out into window
      * manager with lock held.  (This lock will be acquired in places
@@ -249,6 +258,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private final Object mLock = new Object();
 
     Context mContext;
+    Context mUiContext;
     IWindowManager mWindowManager;
     WindowManagerFuncs mWindowManagerFuncs;
     PowerManager mPowerManager;
@@ -560,6 +570,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
     private boolean mOffscreenGestureSupport;
     private boolean mStartCameraFromGesture;
+    private boolean mStartTorchFromGesture;
 
     // Fallback actions by key code.
     private final SparseArray<KeyCharacterMap.FallbackAction> mFallbackActions =
@@ -1284,6 +1295,29 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             screenTurnedOff(WindowManagerPolicy.OFF_BECAUSE_OF_USER);
         }
 
+        String deviceKeyHandlerLib = mContext.getResources().getString(
+                com.android.internal.R.string.config_deviceKeyHandlerLib);
+
+        String deviceKeyHandlerClass = mContext.getResources().getString(
+                com.android.internal.R.string.config_deviceKeyHandlerClass);
+
+        if (!deviceKeyHandlerLib.isEmpty() && !deviceKeyHandlerClass.isEmpty()) {
+            DexClassLoader loader =  new DexClassLoader(deviceKeyHandlerLib,
+                    new ContextWrapper(mContext).getCacheDir().getAbsolutePath(),
+                    null,
+                    ClassLoader.getSystemClassLoader());
+            try {
+                Class<?> klass = loader.loadClass(deviceKeyHandlerClass);
+                Constructor<?> constructor = klass.getConstructor(Context.class);
+                mDeviceKeyHandler = (DeviceKeyHandler) constructor.newInstance(
+                        mContext);
+                if(DEBUG) Slog.d(TAG, "Device key handler loaded");
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not instantiate device key handler "
+                        + deviceKeyHandlerClass + " from class "
+                        + deviceKeyHandlerLib, e);
+            }
+        }
         mPowerMenuReceiver = new PowerMenuReceiver(context);
         mPowerMenuReceiver.registerSelf();
     }
@@ -2921,6 +2955,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
 
         if (mGlobalKeyManager.handleGlobalKey(mContext, keyCode, event)) {
             return -1;
+
         }
 
         // Let the application handle the key.
@@ -4634,6 +4669,18 @@ public class PhoneWindowManager implements WindowManagerPolicy {
             return result;
         }
 
+        // Specific device key handling
+        if (mDeviceKeyHandler != null) {
+            try {
+                // The device only should consume known keys.
+                if (mDeviceKeyHandler.handleKeyEvent(event)) {
+                    return 0;
+                }
+            } catch (Exception e) {
+                Slog.w(TAG, "Could not dispatch event to device key handler", e);
+            }
+        }
+
         // Handle special keys.
         switch (keyCode) {
             case KeyEvent.KEYCODE_VOLUME_DOWN:
@@ -5186,6 +5233,10 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         if (mStartCameraFromGesture){
             dismissKeyguardLw();
             startCameraFromGesture();
+        }
+        if (mStartTorchFromGesture) {
+            dismissKeyguardLw();
+            startTorchFromGesture();
         }
     }
 
@@ -6372,6 +6423,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     private boolean isOffscreenWakeKey(int keyCode) {
         return keyCode == KeyEvent.KEYCODE_F3 ||
             keyCode == KeyEvent.KEYCODE_F4 ||
+            keyCode == KeyEvent.KEYCODE_F5 ||
             keyCode == KeyEvent.KEYCODE_F1;
     }
 
@@ -6398,8 +6450,7 @@ public class PhoneWindowManager implements WindowManagerPolicy {
                         Slog.d(TAG, "handleOffscreenGesture: " + "V gesture");
                     }
                     if (DeviceUtils.deviceSupportsTorch(mContext)) {
-                        mContext.sendBroadcastAsUser(new Intent(OmniTorchConstants.ACTION_TOGGLE_STATE),
-                            UserHandle.CURRENT_OR_SELF);
+                        mStartTorchFromGesture = true;
                     }
                 }
                 break;
@@ -6465,7 +6516,6 @@ public class PhoneWindowManager implements WindowManagerPolicy {
         return false;
     }
 
-
     private Message createMediaEventMessage(KeyEvent event, int msgId, int eventId) {
         return mHandler.obtainMessage(msgId,
                 new KeyEvent(event.getDownTime(), event.getEventTime(),
@@ -6473,9 +6523,21 @@ public class PhoneWindowManager implements WindowManagerPolicy {
     }
 
     private void startCameraFromGesture() {
+        if (DEBUG_INPUT){
+            Log.d(TAG, "startCameraFromGesture " + mStartCameraFromGesture);
+        }
         Intent intent = new Intent(MediaStore.INTENT_ACTION_STILL_IMAGE_CAMERA);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         mContext.startActivityAsUser(intent, UserHandle.CURRENT);
         mStartCameraFromGesture = false;
+    }
+
+    private void startTorchFromGesture() {
+        if (DEBUG_INPUT){
+            Log.d(TAG, "startTorchFromGesture " + mStartTorchFromGesture);
+        }
+        mContext.sendBroadcastAsUser(new Intent(OmniTorchConstants.ACTION_FLASH_STATE),
+                            UserHandle.CURRENT_OR_SELF);
+        mStartTorchFromGesture = false;
     }
 }
