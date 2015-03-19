@@ -9,6 +9,9 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.res.Resources;
 import android.database.ContentObserver;
+import android.graphics.Color;
+import android.graphics.drawable.Drawable;
+import android.graphics.PorterDuff;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.TrafficStats;
@@ -56,6 +59,7 @@ public class NetworkTraffic extends TextView {
     private int KB = KILOBIT;
     private int MB = KB * KB;
     private int GB = MB * KB;
+    private int mCurrentColor = Color.WHITE;
 
     private Handler mTrafficHandler = new Handler() {
         @Override
@@ -241,6 +245,8 @@ public class NetworkTraffic extends TextView {
         MB = KB * KB;
         GB = MB * KB;
 
+        updateTextColor();
+
         if (isSet(mState, MASK_UP) || isSet(mState, MASK_DOWN)) {
             if (getConnectAvailable()) {
                 if (mAttached) {
@@ -273,9 +279,22 @@ public class NetworkTraffic extends TextView {
         mTrafficHandler.removeMessages(1);
     }
 
+    public void updateSettings(int defaultColor) {
+        mCurrentColor = defaultColor;
+        updateTextColor();
+        updateTrafficDrawable();
+    }
+
+    private void updateTextColor() {
+        int clockColor = getResources().getColor(R.color.status_bar_clock_color);
+        int nowColor = mCurrentColor != -3 ? mCurrentColor : clockColor;
+        setTextColor(nowColor);
+    }
+
     private void updateTrafficDrawable() {
         int intTrafficDrawable;
-        if (isSet(mState, MASK_UP + MASK_DOWN)) {
+        boolean showAll = isSet(mState, MASK_UP + MASK_DOWN);
+        if (showAll) {
             intTrafficDrawable = R.drawable.stat_sys_network_traffic_updown;
         } else if (isSet(mState, MASK_UP)) {
             intTrafficDrawable = R.drawable.stat_sys_network_traffic_up;
@@ -284,6 +303,14 @@ public class NetworkTraffic extends TextView {
         } else {
             intTrafficDrawable = 0;
         }
-        setCompoundDrawablesWithIntrinsicBounds(0, 0, intTrafficDrawable, 0);
+        Drawable drw = null;
+        if (intTrafficDrawable != 0) {
+            final Resources resources = getContext().getResources();
+            drw = resources.getDrawable(intTrafficDrawable);
+            if (showAll) {
+                drw.setColorFilter(mCurrentColor, PorterDuff.Mode.SRC_ATOP);
+            }
+        }
+        setCompoundDrawablesWithIntrinsicBounds(null, null, drw, null);
     }
 }

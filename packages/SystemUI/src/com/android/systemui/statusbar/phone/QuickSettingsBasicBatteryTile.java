@@ -70,6 +70,13 @@ public class QuickSettingsBasicBatteryTile extends QuickSettingsTileView {
         throw new RuntimeException("why?");
     }
 
+    @Override
+    public void setEditMode(boolean enabled) {
+        // No hover on edit mode
+        changeCurrentBackground(enabled);
+        super.setEditMode(enabled);
+    }
+
     public BatteryMeterView getBattery() {
         return mBattery;
     }
@@ -100,16 +107,45 @@ public class QuickSettingsBasicBatteryTile extends QuickSettingsTileView {
         mTextView.invalidate();
     }
 
+    @Override
+    protected void changeCurrentUiColor(int ic_color) {
+        if (mTextView != null) {
+            if (ic_color != -3) {
+                mTextView.setTextColor(ic_color);
+            } else {
+                mTextView.setTextColor(getDefaultColor());
+            }
+        }
+        if (mBattery != null) {
+            mBattery.updateSettings(ic_color);
+        }
+        if (mCircleBattery != null) {
+            mCircleBattery.updateSettings(ic_color);
+        }
+        if (mPercentBattery != null) {
+            mPercentBattery.updateSettings(ic_color);
+        }
+    }
+
+    @Override
+    public void changeColorIconBackground(int bg_color, int ic_color) {
+        super.changeColorIconBackground(bg_color, ic_color);
+        changeCurrentUiColor(ic_color);
+    }
+
     public void setTextResource(int resId) {
         mTextView.setText(resId);
     }
 
     public void updateBatterySettings() {
-        if (mBattery == null) {
-            return;
+        if (mBattery != null) {
+            mBattery.updateSettings();
         }
-        mCircleBattery.updateSettings();
-        mBattery.updateSettings();
-        mPercentBattery.updateSettings();
+        if (mCircleBattery != null) {
+            mCircleBattery.updateSettings();
+        }
+        if (mPercentBattery != null) {
+            mPercentBattery.updateSettings();
+        }
     }
 }

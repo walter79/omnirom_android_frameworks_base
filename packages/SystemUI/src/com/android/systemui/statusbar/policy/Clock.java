@@ -81,6 +81,7 @@ public class Clock extends TextView implements DemoMode {
     protected boolean mShowClockStatusBar = true;
 
     private int mAmPmStyle;
+    private int mCurrentColor = -3;
 
     private SettingsObserver mSettingsObserver;
 
@@ -308,6 +309,17 @@ public class Clock extends TextView implements DemoMode {
         return formatted;
     }
 
+    public void updateSettings(int defaultColor) {
+        mCurrentColor = defaultColor;
+        updateTextColor();
+    }
+
+    private void updateTextColor() {
+        int clockColor = getResources().getColor(R.color.status_bar_clock_color);
+        int nowColor = mCurrentColor != -3 ? mCurrentColor : clockColor;
+        setTextColor(nowColor);
+    }
+
     public void updateSettings() {
         ContentResolver resolver = mContext.getContentResolver();
 
@@ -333,10 +345,9 @@ public class Clock extends TextView implements DemoMode {
                 Settings.System.STATUSBAR_CLOCK_DATE_STYLE, CLOCK_DATE_STYLE_UPPERCASE,
                 UserHandle.USER_CURRENT);
 
-        int clockColor = getResources().getColor(R.color.status_bar_clock_color);
+        updateTextColor();
 
         if (mAttached) {
-            setTextColor(clockColor);
             updateClockVisibility();
             updateClock();
         }

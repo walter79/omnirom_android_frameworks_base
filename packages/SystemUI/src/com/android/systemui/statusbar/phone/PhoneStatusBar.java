@@ -42,12 +42,15 @@ import android.content.IntentFilter;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.database.ContentObserver;
+import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Color;
 import android.graphics.ColorFilter;
 import android.graphics.PixelFormat;
 import android.graphics.Point;
 import android.graphics.PorterDuff;
 import android.graphics.Rect;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.TransitionDrawable;
@@ -80,14 +83,17 @@ import android.view.ViewGroup.LayoutParams;
 import android.view.ViewPropertyAnimator;
 import android.view.ViewStub;
 import android.view.WindowManager;
+import android.view.WindowManagerGlobal;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.Animation;
 import android.view.animation.AnimationUtils;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
+import android.widget.ImageSwitcher;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.TextSwitcher;
 import android.widget.TextView;
 
 import com.android.internal.statusbar.StatusBarIcon;
@@ -109,6 +115,7 @@ import com.android.systemui.statusbar.policy.BatteryController;
 import com.android.systemui.statusbar.policy.BluetoothController;
 import com.android.systemui.statusbar.policy.Clock;
 import com.android.systemui.statusbar.policy.ClockCenter;
+import com.android.systemui.statusbar.policy.ClockStock;
 import com.android.systemui.statusbar.policy.NetworkTraffic;
 import com.android.systemui.statusbar.policy.DateView;
 import com.android.systemui.statusbar.policy.HeadsUpNotificationView;
@@ -117,14 +124,15 @@ import com.android.systemui.statusbar.policy.NetworkController;
 import com.android.systemui.statusbar.policy.NotificationRowLayout;
 import com.android.systemui.statusbar.policy.OnSizeChangedListener;
 import com.android.systemui.statusbar.policy.RotationLockController;
-import com.android.internal.util.omni.PackageUtils;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 
+import com.android.internal.util.omni.ColorUtils;
 import com.android.internal.util.omni.DeviceUtils;
+import com.android.internal.util.omni.PackageUtils;
 import static com.android.internal.util.omni.DeviceUtils.IMMERSIVE_MODE_OFF;
 
 public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
@@ -220,6 +228,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     ClockCenter mClockCenter;
     View mCenterSpacer;
     NetworkTraffic mNetworkTraffic;
+    private boolean mForceShowClockOnLockscreen = false;
 
     private BatteryMeterView mBattery;
     private BatteryCircleMeterView mCircleBattery;
@@ -265,7 +274,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
     // the date view
     DateView mDateView;
-    View mClockView;
+    ClockStock mClockView;
 
     // for heads up notifications
     private HeadsUpNotificationView mHeadsUpNotificationView;
@@ -311,6 +320,31 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     private Runnable mStatusHeaderUpdater;
     private ImageView mStatusHeaderImage;
     private Drawable mHeaderOverlay;
+
+    // tinted statusbar
+    private int mCurrentColorProgress = 0;
+    private int mCurrentTintedProgress = 0;
+    private int mPackageActbar = -3;
+    private int mPackageActbarIc = -3;
+    private int mPackageSt = -3;
+    private int mPackageNv = -3;
+    private int mPackageIcSt = Color.WHITE;
+    private int mPackageIcNv = Color.WHITE;
+    private int mCurrentUiBgColor = -3;
+    private int mCurrentUiTextColor = -3;
+    private boolean mColorFullMode = false;
+    private boolean mStatBackgroundMode = false;
+    private boolean mNavBackgroundMode = false;
+    private boolean mIsImmersiveMode = false;
+    private boolean mColorFilterEnabled = false;
+    private boolean mStatbarShouldChangeColor = false;
+    private boolean mStatusbarIsReset = true;
+    private boolean mNavbarIsReset = true;
+    private boolean mTintedNeedReset = false;
+    private boolean mImeStatusShow = false;
+    private boolean mSystemUIOpaque = false;
+    private int mStatusbarTransparent = 0;
+    private int mNavbarTransparent = 0;
 
     // for disabling the status bar
     int mDisabled = 0;
@@ -361,7 +395,8 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
                     Settings.System.STATUS_BAR_CUSTOM_HEADER), false, this, UserHandle.USER_ALL);
             resolver.registerContentObserver(Settings.System.getUriFor(
                     Settings.System.NAVIGATION_BAR_SHOW), false, this, UserHandle.USER_ALL);
-
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.STATUS_BAR_FORCE_CLOCK_LOCKSCREEN), false, this, UserHandle.USER_ALL);
             update();
         }
 
@@ -386,6 +421,9 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
             int showNavBar = Settings.System.getIntForUser(
                     resolver, Settings.System.NAVIGATION_BAR_SHOW, -1
                     , UserHandle.USER_CURRENT);
+            mForceShowClockOnLockscreen = Settings.System.getIntForUser(
+                    resolver, Settings.System.STATUS_BAR_FORCE_CLOCK_LOCKSCREEN, 0
+                    , UserHandle.USER_CURRENT) == 1;
             if (showNavBar != -1){
                 boolean showNavBarBool = showNavBar == 1;
                 if (showNavBarBool !=  mShowNavBar){
@@ -398,6 +436,75 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     }
 
     private SettingsObserver mSettingsObserver = new SettingsObserver(mHandler);
+
+    private class TintedStatusbarObserver extends ContentObserver {
+        TintedStatusbarObserver(Handler handler) {
+            super(handler);
+        }
+
+        void observe() {
+            ContentResolver resolver = mContext.getContentResolver();
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.STATUS_BAR_TINTED_COLOR), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.STATUS_BAR_TINTED_OPTION), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.STATUS_BAR_TINTED_FILTER), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.STATUS_BAR_TINTED_STATBAR_TRANSPARENT), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.STATUS_BAR_TINTED_NAVBAR_TRANSPARENT), false, this,
+                    UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(
+                    Settings.System.STATUS_BAR_TINTED_FULL_MODE), false, this,
+                    UserHandle.USER_ALL);
+            update();
+        }
+
+        @Override
+        public void onChange(boolean selfChange) {
+            update();
+        }
+
+        public void update() {
+            final ContentResolver resolver = mContext.getContentResolver();
+            mCurrentColorProgress = Settings.System.getIntForUser(
+                    resolver, Settings.System.STATUS_BAR_TINTED_COLOR, 0
+                    , UserHandle.USER_CURRENT);
+            mCurrentTintedProgress = Settings.System.getIntForUser(
+                    resolver, Settings.System.STATUS_BAR_TINTED_OPTION, 0
+                    , UserHandle.USER_CURRENT);
+            mColorFilterEnabled = Settings.System.getIntForUser(
+                    resolver, Settings.System.STATUS_BAR_TINTED_FILTER, 0
+                    , UserHandle.USER_CURRENT) == 1;
+            mStatusbarTransparent = Settings.System.getIntForUser(
+                    resolver, Settings.System.STATUS_BAR_TINTED_STATBAR_TRANSPARENT, 100
+                    , UserHandle.USER_CURRENT);
+            mNavbarTransparent = Settings.System.getIntForUser(
+                    resolver, Settings.System.STATUS_BAR_TINTED_NAVBAR_TRANSPARENT, 100
+                    , UserHandle.USER_CURRENT);
+            mColorFullMode = (mCurrentColorProgress == 2) && (Settings.System.getIntForUser(
+                    resolver, Settings.System.STATUS_BAR_TINTED_FULL_MODE, 0
+                    , UserHandle.USER_CURRENT) == 1);
+            if (!mColorFullMode && !mStatusbarIsReset && mTintedNeedReset) {
+                resetStatusbarColorChanges(true);
+            }
+            if (mCurrentColorProgress == 0 && mTintedNeedReset) {
+                resetSystemUIBackgroundColor();
+            }
+            mStatbarShouldChangeColor = ((mCurrentColorProgress != 0)
+                 && (mCurrentTintedProgress == 0 || mCurrentTintedProgress == 2));
+            boolean navbarColor = ((mCurrentColorProgress != 0)
+                 && (mCurrentTintedProgress == 1 || mCurrentTintedProgress == 2));
+            setSystemUIBackgroundColorEnabled(mStatbarShouldChangeColor, navbarColor);
+        }
+    }
+
+    private TintedStatusbarObserver mTintedStatusbarObserver = new TintedStatusbarObserver(mHandler);
 
     private class TilesChangedObserver extends ContentObserver {
         TilesChangedObserver(Handler handler) {
@@ -501,9 +608,13 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         if (mQS != null) {
             mQS.updateBattery();
         }
-        if (mBattery != null && mCircleBattery != null && mPercentBattery != null) {
+        if (mBattery != null) {
             mBattery.updateSettings();
+        }
+        if (mCircleBattery != null) {
             mCircleBattery.updateSettings();
+        }
+        if (mPercentBattery != null) {
             mPercentBattery.updateSettings();
         }
     }
@@ -546,6 +657,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         mSettingsObserver.observe();
         mBatteryIconSettingsObserver.observe();
         mTilesChangedObserver.observe();
+        mTintedStatusbarObserver.observe();
 
         // Lastly, call to the icon policy to install/update all the icons.
         mIconPolicy = new PhoneStatusBarPolicy(mContext);
@@ -592,6 +704,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
         mStatusBarView = (PhoneStatusBarView) mStatusBarWindow.findViewById(R.id.status_bar);
         mStatusBarView.setBar(this);
+        mStatusBarView.setPhoneStatusBar(this);
 
         PanelHolder holder = (PanelHolder) mStatusBarWindow.findViewById(R.id.panel_holder);
         mStatusBarView.setPanelHolder(holder);
@@ -637,6 +750,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
                 mNavigationBarView.setDisabledFlags(mDisabled);
                 mNavigationBarView.setBar(this);
+                mNavigationBarView.setPhoneStatusBar(this);
                 mNavigationBarView.setOnTouchListener(new View.OnTouchListener() {
                     @Override
                     public boolean onTouch(View v, MotionEvent event) {
@@ -693,7 +807,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
             mDateView.setOnClickListener(mCalendarClickListener);
             mDateView.setEnabled(true);
         }
-        mClockView = mNotificationPanelHeader.findViewById(R.id.clock);
+        mClockView = (ClockStock)mNotificationPanelHeader.findViewById(R.id.clock);
         if (mClockView != null) {
             mClockView.setOnClickListener(mClockClickListener);
             mClockView.setEnabled(true);
@@ -744,7 +858,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         }
 
         mTicker = new MyTicker(context, mStatusBarView);
-
+        mTicker.setStatusBar(this);
         TickerView tickerView = (TickerView)mStatusBarView.findViewById(R.id.tickerText);
         tickerView.mTicker = mTicker;
 
@@ -765,6 +879,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
         mNetworkController.addSignalCluster(signalCluster);
         signalCluster.setNetworkController(mNetworkController);
+        signalCluster.setStatusBar(this);
 
         final boolean isAPhone = mNetworkController.hasVoiceCallingFeature();
         if (isAPhone) {
@@ -896,7 +1011,6 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         mBattery = (BatteryMeterView) mStatusBarView.findViewById(R.id.battery);
         mCircleBattery = (BatteryCircleMeterView) mStatusBarView.findViewById(R.id.circle_battery);
         mPercentBattery = (BatteryPercentMeterView) mStatusBarView.findViewById(R.id.percent_battery);
-
         return mStatusBarView;
     }
 
@@ -909,6 +1023,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
                 mStatusHeaderUpdater = new Runnable() {
                     private Drawable mPrevious = mNotificationPanelHeader.getBackground();
 
+                    @Override
                     public void run() {
                         Drawable next = mStatusHeaderMachine.getCurrent();
                         Log.i(TAG, "Updating status bar header background");
@@ -1069,6 +1184,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
     private int mShowSearchHoldoff = 0;
     private Runnable mShowSearchPanel = new Runnable() {
+        @Override
         public void run() {
             showSearchPanel();
             awakenDreams();
@@ -1202,6 +1318,9 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
                 + " icon=" + icon);
         StatusBarIconView view = new StatusBarIconView(mContext, slot, null);
         view.set(icon);
+        if (view instanceof ImageView) {
+            addIconToColor((ImageView) view);
+        }
         mStatusIcons.addView(view, viewIndex, new LinearLayout.LayoutParams(mIconSize, mIconSize));
     }
 
@@ -1211,10 +1330,15 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
                 + " old=" + old + " icon=" + icon);
         StatusBarIconView view = (StatusBarIconView)mStatusIcons.getChildAt(viewIndex);
         view.set(icon);
+        if (view instanceof ImageView) {
+            addIconToColor((ImageView) view);
+        }
     }
 
     public void removeIcon(String slot, int index, int viewIndex) {
         if (SPEW) Log.d(TAG, "removeIcon slot=" + slot + " index=" + index + " viewIndex=" + viewIndex);
+        ImageView view = (ImageView) mStatusIcons.getChildAt(viewIndex);
+        removeIconToColor(view);
         mStatusIcons.removeViewAt(viewIndex);
     }
 
@@ -1415,15 +1539,22 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         }
 
         for (View remove : toRemove) {
+            if (remove instanceof ImageView) {
+                removeNotificationIconToColor((ImageView) remove);
+            }
             mNotificationIcons.removeView(remove);
         }
 
         for (int i=0; i<toShow.size(); i++) {
             View v = toShow.get(i);
             if (v.getParent() == null) {
+                if (v instanceof ImageView) {
+                    addNotificationIconToColor((ImageView) v);
+                }
                 mNotificationIcons.addView(v, i, params);
             }
         }
+        updateNotificationIconColor();
     }
 
     protected void updateCarrierLabelVisibility(boolean force) {
@@ -1545,11 +1676,73 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
     public void showClock(boolean show) {
         if (mStatusBarView == null) return;
+        if (mForceShowClockOnLockscreen) {
+            show = true;
+        }
         if (mClock != null) {
             mClock.updateVisibilityFromStatusBar(show);
         }
         if (mClockCenter != null) {
             mClockCenter.updateVisibilityFromStatusBar(show);
+        }
+    }
+
+    public void addIconToColor(ImageView iv) {
+        mStatusBarView.getPhoneStatusBarTransitions().addIcon(iv);
+    }
+
+    public void removeIconToColor(ImageView iv) {
+        mStatusBarView.getPhoneStatusBarTransitions().removeIcon(iv);
+    }
+
+    public void addIconToReverseColor(ImageView iv) {
+        mStatusBarView.getPhoneStatusBarTransitions().addIconReverse(iv);
+    }
+
+    private void addNotificationIconToColor(ImageView iv) {
+        mStatusBarView.getPhoneStatusBarTransitions().addNotificationIcon(iv);
+    }
+
+    private void removeNotificationIconToColor(ImageView iv) {
+        mStatusBarView.getPhoneStatusBarTransitions().removeNotificationIcon(iv);
+    }
+
+    public void addColorToAllTextSwitcherChildren(TextSwitcher switcher) {
+        for (int i = 0; i < switcher.getChildCount(); i++) {
+             TextView view = (TextView) switcher.getChildAt(i);
+             mStatusBarView.getPhoneStatusBarTransitions().addNotificationText(view);
+        }
+    }
+
+    public void removeColorToAllTextSwitcherChildren(TextSwitcher switcher) {
+        for (int i = 0; i < switcher.getChildCount(); i++) {
+             TextView view = (TextView) switcher.getChildAt(i);
+             mStatusBarView.getPhoneStatusBarTransitions().removeNotificationText(view);
+        }
+    }
+
+    public void addColorToAllImageSwitcherChildren(ImageSwitcher switcher) {
+        for (int i = 0; i < switcher.getChildCount(); i++) {
+             ImageView view = (ImageView) switcher.getChildAt(i);
+             mStatusBarView.getPhoneStatusBarTransitions().addNotificationIcon(view);
+        }
+    }
+
+    public void removeColorToAllImageSwitcherChildren(ImageSwitcher switcher) {
+        for (int i = 0; i < switcher.getChildCount(); i++) {
+             ImageView view = (ImageView) switcher.getChildAt(i);
+             mStatusBarView.getPhoneStatusBarTransitions().removeNotificationIcon(view);
+        }
+    }
+
+    public void updateNotificationIconColor() {
+        if (mStatbarShouldChangeColor && !mIsImmersiveMode
+            && mStatBackgroundMode) {
+            if (mColorFullMode) {
+                int colorBg = ColorUtils.changeColorTransparency(mCurrentUiBgColor, 95);
+                updateNotificationViewColor(colorBg, mCurrentUiTextColor);
+            }
+            mStatusBarView.getPhoneStatusBarTransitions().updateNotificationIconColor();
         }
     }
 
@@ -1760,6 +1953,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         visibilityChanged(true);
 
         setInteracting(StatusBarManager.WINDOW_STATUS_BAR, true);
+        setNavbarColorWithStatusbar(true);
     }
 
     private void releaseFocus() {
@@ -1912,6 +2106,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         mClearButton.setAlpha(0f);
         setAreThereNotifications(); // this will show/hide the button as necessary
         mNotificationPanel.postDelayed(new Runnable() {
+            @Override
             public void run() {
                 updateCarrierLabelVisibility(false);
             }
@@ -2058,6 +2253,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
                 .setDuration(FLIP_DURATION),
                 mClearButton, View.INVISIBLE));
         mNotificationPanel.postDelayed(new Runnable() {
+            @Override
             public void run() {
                 updateCarrierLabelVisibility(false);
             }
@@ -2080,7 +2276,12 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     }
 
     void makeExpandedInvisibleSoon() {
-        mHandler.postDelayed(new Runnable() { public void run() { makeExpandedInvisible(); }}, 50);
+        mHandler.postDelayed(new Runnable() {
+               @Override
+               public void run() {
+                   makeExpandedInvisible();
+               }
+        }, 50);
     }
 
     void makeExpandedInvisible() {
@@ -2140,7 +2341,9 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
             mPostCollapseCleanup = null;
         }
 
+        mSystemUIOpaque = false;
         setInteracting(StatusBarManager.WINDOW_STATUS_BAR, false);
+        setNavbarColorWithStatusbar(false);
     }
 
     /**
@@ -2446,13 +2649,16 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
     private void checkBarModes() {
         if (mDemoMode) return;
+        mStatBackgroundMode = (mStatusBarMode == MODE_OPAQUE);
         int sbMode = mStatusBarMode;
         if (panelsEnabled() && (mInteractingWindows & StatusBarManager.WINDOW_STATUS_BAR) != 0) {
             // if panels are expandable, force the status bar opaque on any interaction
             sbMode = MODE_OPAQUE;
+            mSystemUIOpaque = true;
         }
         checkBarMode(sbMode, mStatusBarWindowState, mStatusBarView.getBarTransitions());
         if (mNavigationBarView != null) {
+            mNavBackgroundMode = (mNavigationBarMode == MODE_OPAQUE);
             checkBarMode(mNavigationBarMode,
                     mNavigationBarWindowState, mNavigationBarView.getBarTransitions());
         }
@@ -2570,6 +2776,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
                 altBack ? (mNavigationIconHints | NAVIGATION_HINT_BACK_ALT)
                         : (mNavigationIconHints & ~NAVIGATION_HINT_BACK_ALT));
         if (mQS != null) mQS.setImeWindowStatus(vis > 0);
+        setSystemUIBackgroundColorOnIme(altBack);
     }
 
     @Override
@@ -2738,6 +2945,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
                 pw.println("see the logcat for a dump of the views we have created.");
                 // must happen on ui thread
                 mHandler.post(new Runnable() {
+                        @Override
                         public void run() {
                             mStatusBarView.getLocationOnScreen(mAbsPos);
                             Log.d(TAG, "mStatusBarView: ----- (" + mAbsPos[0] + "," + mAbsPos[1]
@@ -3004,6 +3212,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     };
 
     private final Runnable mEditModeEnabled = new Runnable() {
+        @Override
         public void run() {
             if (mSettingsContainer != null) {
                 mSettingsContainer.setEditModeEnabled(true);
@@ -3133,6 +3342,351 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         }
     };
 
+    @Override // CommandQueue
+    public void sendActionColorBroadcast(int st_color, int ic_color) {
+        if (mCurrentColorProgress != 0) {
+            mPackageActbar = st_color;
+            mPackageActbarIc = ic_color;
+        }
+    }
+
+    @Override // CommandQueue
+    public void sendAppColorBroadcast(int duration) {
+        if (mCurrentColorProgress != 0) {
+            setSystemUIBackgroundColor(duration);
+        }
+    }
+
+    @Override // CommandQueue
+    public void sendAppImmersiveMode(int whats) {
+        mIsImmersiveMode = (whats != 0);
+        if (mStatusBarView != null) {
+            mStatBackgroundMode = mStatusBarView.getBarTransitions().isOpaque();
+        }
+        if (mNavigationBarView != null) {
+            mNavBackgroundMode = mNavigationBarView.getBarTransitions().isOpaque();
+        }
+    }
+
+    private void setSystemUIBackgroundColorOnIme(final boolean altBack) {
+        if (mCurrentColorProgress != 0) {
+            if (mImeStatusShow) {
+                mImeStatusShow = altBack;
+            } else {
+                mHandler.postDelayed(new Runnable() {
+                     @Override
+                     public void run() {
+                         mImeStatusShow = altBack;
+                     }
+                }, 1000);
+            }
+            setSystemUIBackgroundColor(500);
+        }
+    }
+
+    private boolean shouldResetSystemUi() {
+        return (!mStatBackgroundMode && !mNavBackgroundMode)
+             || mIsImmersiveMode || inKeyguardRestrictedInputMode();
+    }
+
+    private void setSystemUIBackgroundColor(int duration) {
+        if (mSystemUIOpaque || mImeStatusShow) {
+            mHandler.removeCallbacks(mTintedStatusbarRunnable);
+            return;
+        }
+        if (shouldResetSystemUi()) {
+            resetSystemUIBackgroundColor();
+            return;
+        }
+        if (mCurrentColorProgress == 1) {
+            mPackageNv = mPackageSt = mPackageActbar;
+            mPackageIcNv = mPackageIcSt = mPackageActbarIc;
+        }
+        if ((mStatBackgroundMode || mNavBackgroundMode) && mCurrentColorProgress == 2) {
+            if (duration > 50) {
+                mHandler.removeCallbacks(mSetColorFromScreenShotRunnable);
+                mHandler.postDelayed(mSetColorFromScreenShotRunnable, duration / 2);
+            } else {
+                setColorFromScreenShot();
+            }
+        }
+        if ((mCurrentTintedProgress == 1 || !mStatBackgroundMode) && !mStatusbarIsReset) {
+             mStatusbarIsReset = true;
+             resetStatusbarColorChanges(true);
+        }
+        if ((mCurrentTintedProgress == 0 || !mNavBackgroundMode) && !mNavbarIsReset) {
+             mNavbarIsReset = true;
+             if (mNavigationBarView != null) {
+                 mNavigationBarView.getBarTransitions().changeColorIconBackground(-3, -3);
+             }
+        }
+        mHandler.removeCallbacks(mTintedStatusbarRunnable);
+        mHandler.postDelayed(mTintedStatusbarRunnable, duration);
+    }
+
+    private final Runnable mSetColorFromScreenShotRunnable = new Runnable() {
+        @Override
+        public void run() {
+            setColorFromScreenShot();
+        }
+    };
+
+    private void setColorFromScreenShot() {
+        try {
+             int[] colors = mWindowManagerService.getColorFromTopBottomApplication();
+             mPackageSt = colors[0];
+             mPackageNv = colors[1];
+        } catch (RemoteException ex) {
+             mPackageSt = -3;
+             mPackageNv = -3;
+        }
+    }
+
+    @Override
+    public boolean updateNotificationViewsColor(NotificationData.Entry entry) {
+        if (mStatbarShouldChangeColor && !mIsImmersiveMode && mColorFullMode
+            && mStatBackgroundMode) {
+            return super.updateNotificationViewsColor(entry);
+        }
+        return false;
+    }
+
+    private void setNavbarColorWithStatusbar(boolean whats) {
+        if (mStatbarShouldChangeColor && mColorFullMode && !mIsImmersiveMode
+            && mTintedNeedReset && !mNavbarIsReset) {
+            if (mNavigationBarView != null) {
+                int color = whats ? mPackageSt : mPackageNv;
+                mNavigationBarView.getBarTransitions().changeColorIconBackground(color, mPackageIcNv);
+            }
+        }
+    }
+
+    public void resetStatusbarColorChanges(boolean force) {
+        if (mColorFullMode || force) {
+            if (mNotificationPanel != null) {
+                mNotificationPanel.setBackgroundResource(R.drawable.notification_panel_bg);
+                mNotificationPanel.setHandleViewColor(-3);
+                if (!mCustomHeader) {
+                    mStatusHeaderImage.setImageDrawable(mStatusHeaderMachine.getDefault());
+                }
+            }
+            if (mSettingsPanel != null) {
+                mSettingsPanel.setBackgroundResource(R.drawable.notification_panel_bg);
+                mSettingsPanel.setHandleViewColor(-3);
+            }
+            if (mSettingsContainer != null) {
+                mSettingsContainer.changeColorIconBackground(-3, -3);
+            }
+            updateNotificationViewColor(-3, -3);
+            onUiColorChange(-3);
+        }
+        if (!force) {
+            mStatusBarView.getBarTransitions().changeColorIconBackground(-3, -3);
+            onBatteryColorChange(-3);
+            onTextColorChange(-3);
+        }
+    }
+
+    private void onBatteryColorChange(int color) {
+        if (mBattery != null) {
+            mBattery.updateSettings(color);
+        }
+        if (mCircleBattery != null) {
+            mCircleBattery.updateSettings(color);
+        }
+        if (mPercentBattery != null) {
+            mPercentBattery.updateSettings(color);
+        }
+    }
+
+    private void onTextColorChange(int color) {
+        if (mClock != null) {
+            mClock.updateSettings(color);
+        }
+        if (mClockCenter != null) {
+            mClockCenter.updateSettings(color);
+        }
+        if (mNetworkTraffic != null) {
+            mNetworkTraffic.updateSettings(color);
+        }
+    }
+
+    private void onUiColorChange(int color) {
+        if (mNotificationPanelHeader == null) {
+            return;
+        }
+        if (mCustomHeader) {
+            color = -3;
+        }
+        if (mClearButton != null && mClearButton instanceof ImageView) {
+            if (color != -3) {
+                ((ImageView)mClearButton).setColorFilter(color, PorterDuff.Mode.MULTIPLY);
+            } else {
+                ((ImageView)mClearButton).clearColorFilter();
+            }
+        }
+        if (mEditModeButton != null) {
+            if (color != -3) {
+                mEditModeButton.setColorFilter(color, PorterDuff.Mode.MULTIPLY);
+            } else {
+                mEditModeButton.clearColorFilter();
+            }
+        }
+        if (mSettingsButton != null) {
+            if (color != -3) {
+                mSettingsButton.setColorFilter(color, PorterDuff.Mode.MULTIPLY);
+            } else {
+                mSettingsButton.clearColorFilter();
+            }
+        }
+        if (mNotificationButton != null) {
+            if (color != -3) {
+                mNotificationButton.setColorFilter(color, PorterDuff.Mode.MULTIPLY);
+            } else {
+                mNotificationButton.clearColorFilter();
+            }
+        }
+        if (mDateView != null) {
+            if (color != -3) {
+                mDateView.setTextColor(color);
+            } else {
+                int dateColor = mContext.getResources().getColor(R.color.status_bar_expanded_date_color);
+                mDateView.setTextColor(dateColor);
+            }
+        }
+        if (mClockView != null) {
+            if (color != -3) {
+                mClockView.setTextColor(color);
+            } else {
+                int clockColor = mContext.getResources().getColor(R.color.status_bar_expanded_clock_color);
+                mClockView.setTextColor(clockColor);
+            }
+        }
+        if (mCarrierLabel != null) {
+            if (color != -3) {
+                mCarrierLabel.setTextColor(color);
+            } else {
+                int carrierColor = mContext.getResources().getColor(R.color.status_bar_expanded_carrier_color);
+                mCarrierLabel.setTextColor(carrierColor);
+            }
+        }
+        if (mEmergencyCallLabel != null) {
+            if (color != -3) {
+                mEmergencyCallLabel.setTextColor(color);
+            } else {
+                mEmergencyCallLabel.setTextColor(Color.WHITE);
+            }
+        }
+    }
+
+    private void resetSystemUIBackgroundColor() {
+        if (!mTintedNeedReset) {
+            return;
+        }
+        Log.w(TAG, "Reset tinted statusbar");
+        mTintedNeedReset = false;
+        mHandler.removeCallbacks(mSetColorFromScreenShotRunnable);
+        mHandler.removeCallbacks(mTintedStatusbarRunnable);
+        mPackageActbar = mPackageSt = mPackageNv = -3;
+        mPackageIcSt = mPackageIcNv = Color.WHITE;
+        mPackageActbarIc = -3;
+        mCurrentUiBgColor = mCurrentUiTextColor = -3;
+        mStatusbarIsReset = mNavbarIsReset = true;
+        if (mStatusBarView != null) {
+            resetStatusbarColorChanges(false);
+        }
+        if (mNavigationBarView != null) {
+            mNavigationBarView.getBarTransitions().changeColorIconBackground(-3, -3);
+        }
+    }
+
+    private void onConfigurationChange() {
+        if (mCurrentColorProgress != 0) {
+            tintedStatusbarProgress();
+        }
+    }
+
+    private void setSystemUIBackgroundColorEnabled(boolean stat, boolean navb) {
+        if (mStatusBarView != null) {
+            mStatusBarView.getBarTransitions().setBackgroundColorEnabled(stat);
+        }
+        if (mNavigationBarView != null) {
+            mNavigationBarView.getBarTransitions().setBackgroundColorEnabled(navb);
+        }
+    }
+
+    private void changePanelUiColor() {
+        int colorBg = ColorUtils.changeColorTransparency(mPackageSt, 90);
+        if (mNotificationPanel != null) {
+            if (colorBg != -3) {
+                mNotificationPanel.setBackground(new ColorDrawable(colorBg));
+            }
+            mNotificationPanel.setHandleViewColor(mPackageSt);
+        }
+        if (mSettingsPanel != null) {
+            if (colorBg != -3) {
+                mSettingsPanel.setBackground(new ColorDrawable(colorBg));
+            }
+            mSettingsPanel.setHandleViewColor(mPackageSt);
+        }
+    }
+
+    private void tintedStatusbarProgress() {
+        if ((mCurrentTintedProgress == 0 || mCurrentTintedProgress == 2) && mStatBackgroundMode) {
+            mStatusbarIsReset = false;
+            if (mColorFilterEnabled) {
+                mPackageSt = ColorUtils.opposeColor(mPackageSt);
+            }
+            boolean shouldChanges = (mCurrentUiBgColor != mPackageSt);
+            if (mPackageSt != Color.TRANSPARENT && shouldChanges) {
+                mCurrentUiBgColor = mPackageSt;
+                if (mStatusbarTransparent < 100) {
+                    mPackageSt = ColorUtils.changeColorTransparency(mPackageSt, mStatusbarTransparent);
+                }
+                mStatusBarView.getBarTransitions().changeColorIconBackground(mPackageSt, mPackageIcSt);
+                mCurrentUiTextColor = mStatusBarView.getBarTransitions().getCurrentIconColor();
+                if (mColorFullMode) {
+                    changePanelUiColor();
+                    if ((mNotificationPanelHeader != null) && !mCustomHeader && (mPackageSt != -3)) {
+                        mStatusHeaderImage.setImageDrawable(new ColorDrawable(mPackageSt));
+                    }
+                    int colorBg = ColorUtils.changeColorTransparency(mPackageSt, 95);
+                    if (mSettingsContainer != null) {
+                        mSettingsContainer.changeColorIconBackground(colorBg, mCurrentUiTextColor);
+                    }
+                    updateNotificationViewColor(colorBg, mCurrentUiTextColor);
+                    onUiColorChange(mCurrentUiTextColor);
+                }
+                onBatteryColorChange(mCurrentUiTextColor);
+                onTextColorChange(mCurrentUiTextColor);
+            } else if (shouldChanges) {
+                    mCurrentUiBgColor = mPackageSt;
+                    resetStatusbarColorChanges(false);
+            }
+        }
+        if (mNavigationBarView != null && mNavBackgroundMode
+             && (mCurrentTintedProgress == 1 || mCurrentTintedProgress == 2)) {
+            mNavbarIsReset = false;
+            if (mColorFilterEnabled) {
+                mPackageNv = ColorUtils.opposeColor(mPackageNv);
+            }
+            if (mNavbarTransparent < 100) {
+                mPackageNv = ColorUtils.changeColorTransparency(mPackageNv, mNavbarTransparent);
+            }
+            mNavigationBarView.getBarTransitions().changeColorIconBackground(mPackageNv, mPackageIcNv);
+        }
+        if (mStatBackgroundMode || mNavBackgroundMode) {
+            mTintedNeedReset = true;
+        }
+    }
+
+    private final Runnable mTintedStatusbarRunnable = new Runnable() {
+        @Override
+        public void run() {
+            tintedStatusbarProgress();
+        }
+    };
+
     // SystemUIService notifies SystemBars of configuration changes, which then calls down here
     @Override
     protected void onConfigurationChanged(Configuration newConfig) {
@@ -3147,6 +3701,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         repositionNavigationBar();
         updateExpandedViewPos(EXPANDED_LEAVE_ALONE);
         updateShowSearchHoldoff();
+        onConfigurationChange();
     }
 
     @Override
@@ -3161,6 +3716,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
         mSettingsObserver.update();
         mBatteryIconSettingsObserver.update();
         mTilesChangedObserver.update();
+        mTintedStatusbarObserver.update();
         mNotificationIcons.updateSettings();
         mNetworkTraffic.updateSettings();
         mClock.updateSettings();
@@ -3246,6 +3802,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     }
 
     private final Runnable mQuickSettingsUpdater= new Runnable() {
+        @Override
         public void run() {
             if (isShowingSettings() && isDynamicEnabled()) {
                 // Update the settings container
@@ -3341,6 +3898,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     }
 
     Runnable mStartTracing = new Runnable() {
+        @Override
         public void run() {
             vibrate();
             SystemClock.sleep(250);
@@ -3351,6 +3909,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
     };
 
     Runnable mStopTracing = new Runnable() {
+        @Override
         public void run() {
             android.os.Debug.stopMethodTracing();
             Log.d(TAG, "stopTracing");
@@ -3490,6 +4049,7 @@ public class PhoneStatusBar extends BaseStatusBar implements DemoMode {
 
                 mNavigationBarView.setDisabledFlags(mDisabled);
                 mNavigationBarView.setBar(this);
+                mNavigationBarView.setPhoneStatusBar(this);
                 mNavigationBarView.setOnTouchListener(new View.OnTouchListener() {
                     @Override
                     public boolean onTouch(View v, MotionEvent event) {
